@@ -26,8 +26,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use api::{
     detect_provider_kind, oauth_token_is_expired, resolve_startup_auth_source, AnthropicClient,
     AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderKind, StreamEvent as ApiStreamEvent,
-    ToolChoice, ToolDefinition, ToolResultContentBlock,
+    MessageResponse, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock, PromptCache,
+    ProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 
 use commands::{
@@ -58,7 +59,10 @@ use tools::{execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinit
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
+    let canonical = api::resolve_model_alias(model);
+    if canonical == "gpt-4.1-mini" {
+        32_768
+    } else if canonical.contains("opus") {
         32_000
     } else {
         64_000
@@ -6265,7 +6269,7 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
 
 struct AnthropicRuntimeClient {
     runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
+    client: ProviderClient,
     session_id: String,
     model: String,
     enable_tools: bool,
@@ -6285,11 +6289,24 @@ impl AnthropicRuntimeClient {
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let provider_kind = select_runtime_provider_kind(&model);
+        let provider_client = match provider_kind {
+            ProviderKind::Anthropic => {
+                ProviderClient::from_model_with_anthropic_auth(
+                    &model,
+                    Some(resolve_cli_auth_source()?),
+                )?
+            }
+            ProviderKind::Xai => ProviderClient::Xai(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::xai(),
+            )?),
+            ProviderKind::OpenAi => ProviderClient::OpenAi(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::openai(),
+            )?),
+        };
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
-            client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url())
-                .with_prompt_cache(PromptCache::new(session_id)),
+            client: provider_client.with_prompt_cache(PromptCache::new(session_id)),
             session_id: session_id.to_string(),
             model,
             enable_tools,
@@ -6299,6 +6316,30 @@ impl AnthropicRuntimeClient {
             progress_reporter,
         })
     }
+}
+
+fn select_runtime_provider_kind(model: &str) -> ProviderKind {
+    let canonical = api::resolve_model_alias(model);
+    if canonical.starts_with("claude") {
+        return ProviderKind::Anthropic;
+    }
+    if canonical.starts_with("grok") {
+        return ProviderKind::Xai;
+    }
+
+    // Prefer OpenAI-compatible routing for generic model names when OPENAI
+    // credentials or endpoint are explicitly configured in the process env.
+    let openai_api_key = env::var("OPENAI_API_KEY")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    let openai_base_url = env::var("OPENAI_BASE_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if openai_api_key || openai_base_url {
+        return ProviderKind::OpenAi;
+    }
+
+    detect_provider_kind(&canonical)
 }
 
 fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
@@ -7314,7 +7355,7 @@ fn response_to_events(
     Ok(events)
 }
 
-fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantEvent>) {
     if let Some(record) = client.take_last_prompt_cache_record() {
         if let Some(event) = prompt_cache_record_to_runtime_event(record) {
             events.push(AssistantEvent::PromptCache(event));

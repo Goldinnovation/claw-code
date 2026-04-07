@@ -746,11 +746,14 @@ fn translate_message(message: &InputMessage) -> Vec<Value> {
             if text.is_empty() && tool_calls.is_empty() {
                 Vec::new()
             } else {
-                vec![json!({
+                let mut assistant = json!({
                     "role": "assistant",
                     "content": (!text.is_empty()).then_some(text),
-                    "tool_calls": tool_calls,
-                })]
+                });
+                if !tool_calls.is_empty() {
+                    assistant["tool_calls"] = Value::Array(tool_calls);
+                }
+                vec![assistant]
             }
         }
         _ => message
@@ -789,14 +792,35 @@ fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String {
 }
 
 fn openai_tool_definition(tool: &ToolDefinition) -> Value {
+    let parameters = normalize_openai_parameters_schema(tool.input_schema.clone());
     json!({
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.input_schema,
+            "parameters": parameters,
         }
     })
+}
+
+fn normalize_openai_parameters_schema(mut schema: Value) -> Value {
+    let Some(object) = schema.as_object_mut() else {
+        return schema;
+    };
+    let is_object_schema = object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "object");
+    if !is_object_schema {
+        return schema;
+    }
+    if !object.contains_key("properties") {
+        object.insert("properties".to_string(), json!({}));
+    }
+    if !object.contains_key("additionalProperties") {
+        object.insert("additionalProperties".to_string(), Value::Bool(true));
+    }
+    schema
 }
 
 fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
@@ -1057,6 +1081,7 @@ mod tests {
         assert_eq!(payload["messages"][1]["role"], json!("user"));
         assert_eq!(payload["messages"][2]["role"], json!("tool"));
         assert_eq!(payload["tools"][0]["type"], json!("function"));
+        assert_eq!(payload["tools"][0]["function"]["parameters"]["properties"], json!({}));
         assert_eq!(payload["tool_choice"], json!("auto"));
     }
 

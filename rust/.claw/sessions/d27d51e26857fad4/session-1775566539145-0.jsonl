@@ -1,0 +1,6 @@
+{"created_at_ms":1775566539145,"session_id":"session-1775566539145-0","type":"session_meta","updated_at_ms":1775566545011,"version":1}
+{"text":"hey","timestamp_ms":1775566543786,"type":"prompt_history"}
+{"message":{"blocks":[{"text":"hey","type":"text"}],"role":"user"},"type":"message"}
+{"message":{"blocks":[{"text":"Hello! How can I assist you with your code or project today?","type":"text"}],"role":"assistant","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":4508,"output_tokens":15}},"type":"message"}
+{"text":"can you read my message","timestamp_ms":1775566564308,"type":"prompt_history"}
+{"message":{"blocks":[{"text":"can you read my message","type":"text"}],"role":"user"},"type":"message"}
